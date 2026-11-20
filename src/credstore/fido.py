@@ -78,7 +78,9 @@ def enroll(client, req):
         reply({"error": "you were not verified (no fingerprint, face or PIN check)"}, 1)
     extensions = result.client_extension_results
     out = outputs(extensions)
-    if not out and not (extensions.get("prf") or {}).get("enabled"):
+    # fido2 reports PRF at creation only when authData carries hmac-secret, which Windows Hello can leave out; the caller
+    # then asks with an assertion, where fido2 reads the PRF result directly.
+    if not out and not (extensions.get("prf") or {}).get("enabled") and not platform:
         reply({"error": "this authenticator does not support PRF (hmac-secret)"}, 1)
     reply({"cred_id": websafe_encode(result.raw_id), "outputs": out})
 

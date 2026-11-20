@@ -29,7 +29,7 @@ WSL side:
     cred init                                   # pick the unlock device, set the recovery passphrase, one device check
     cred doctor --device
 
-Upgrade with `uv tool upgrade credstore`; pin a release with `git+https://github.com/damhau/cred@v0.3.0`. Keep the
+Upgrade with `uv tool upgrade credstore`; pin a release with `git+https://github.com/damhau/cred@v0.3.1`. Keep the
 recovery passphrase somewhere safe, offline: it is the way back in if the device is lost or reset.
 
 ### Choosing the unlock device

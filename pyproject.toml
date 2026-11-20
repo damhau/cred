@@ -1,6 +1,6 @@
 [project]
 name = "credstore"
-version = "0.3.0"
+version = "0.3.1"
 description = "Machine-bound secret store for WSL2: Windows DPAPI, locked tiers opened with a YubiKey or Windows Hello"
 authors = [
     { name = "Damien Hauser", email = "damien@dhconsulting.ch" }

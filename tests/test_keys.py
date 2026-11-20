@@ -114,9 +114,16 @@ def test_init_with_the_passphrase_only(store):
 
 def test_windows_hello_without_prf_says_which_update_it_needs(store):
     store.fido.hello_prf = False
-    with pytest.raises(CredError, match="does not support PRF .*February 2026"):
+    with pytest.raises(CredError, match="no PRF output .*February 2026.*Settings > Accounts > Passkeys"):
         store.keys.init(PASSPHRASE, device="hello")
     assert store.keyslots() == []
+
+
+def test_windows_hello_with_prf_only_on_an_assertion(store):
+    store.fido.hello_prf_at_create = False
+    store.keys.init(PASSPHRASE, device="hello")
+    assert store.fido.touches == 2
+    assert store.keys.data_keys() == store.keys.data_keys("passphrase")
 
 
 def test_the_device_chosen_at_init_stays_the_default(keyed):

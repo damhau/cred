@@ -23,6 +23,7 @@ def device_prf(cred_id, salt):
 class FakeWindowsClient:
     calls = []
     verified = True
+    prf_at_create = True
     answer = 0
     fail = None
 
@@ -43,7 +44,7 @@ class FakeWindowsClient:
         return SimpleNamespace(
             raw_id=cred_id,
             response=SimpleNamespace(attestation_object=SimpleNamespace(auth_data=SimpleNamespace(is_user_verified=lambda: self.verified))),
-            client_extension_results={"prf": {"enabled": True, "results": results}},
+            client_extension_results={"prf": {"enabled": True, "results": results}} if self.prf_at_create else {},
         )
 
     def get_assertion(self, options):
@@ -68,6 +69,7 @@ def client(monkeypatch):
     fake.WindowsClient = FakeWindowsClient
     monkeypatch.setitem(sys.modules, "fido2.client.windows", fake)
     FakeWindowsClient.calls, FakeWindowsClient.verified, FakeWindowsClient.answer, FakeWindowsClient.fail = [], True, 0, None
+    FakeWindowsClient.prf_at_create = True
     return FakeWindowsClient
 
 
@@ -101,6 +103,17 @@ def test_enroll_on_windows_hello_asks_for_a_platform_credential(client, monkeypa
     selection = client.calls[0].authenticator_selection
     assert selection.authenticator_attachment == AuthenticatorAttachment.PLATFORM
     assert selection.user_verification == UserVerificationRequirement.REQUIRED
+
+
+@pytest.mark.parametrize("platform, ok", [(True, True), (False, False)])
+def test_no_prf_at_creation_is_left_to_an_assertion_for_windows_hello_only(client, monkeypatch, platform, ok):
+    client.prf_at_create = False
+    request = {"op": "enroll", "rp_id": "cred.local", "salts": [b64e(b"1" * 32), b64e(b"2" * 32)], "exclude": [], "platform": platform}
+    code, reply = run_helper(monkeypatch, request)
+    if ok:
+        assert code == 0 and reply["outputs"] == [] and b64d(reply["cred_id"]) == b"cred-new"
+    else:
+        assert code == 1 and "does not support PRF" in reply["error"]
 
 
 def test_prf_with_one_key_uses_eval(client, monkeypatch):

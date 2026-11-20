@@ -150,14 +150,18 @@ class Keyring:
             raise CredError(f"unknown device {device!r}: yubikey or hello")
         method, platform = METHODS[device], device == "hello"
         salts = {w: os.urandom(32) for w in WHICH}
+        cred_id = None
         try:
             cred_id, outputs = self.store.fido.enroll(RP_ID, [salts[w] for w in WHICH], exclude, platform=platform)
             if len(outputs) < len(WHICH):
                 _, outputs = self.store.fido.prf(RP_ID, {cred_id: [salts[w] for w in WHICH]})
+            if len(outputs) < len(WHICH):
+                raise CredError(f"{LABELS[method]} returned fewer PRF outputs than asked for")
         except CredError as e:
-            if platform:
-                raise CredError(f"{e} ({HELLO_HINT})") from None
-            raise
+            if not platform:
+                raise
+            leftover = " Windows kept an unusable passkey for cred.local: remove it in Settings > Accounts > Passkeys." if cred_id else ""
+            raise CredError(f"{e} ({HELLO_HINT}).{leftover}") from None
         params = {"rp_id": RP_ID, "cred_id": b64e(cred_id), **{f"salt_{w}": b64e(salts[w]) for w in WHICH}}
         return self._wrap(method, label or LABELS[method], params, dict(zip(WHICH, outputs)), keys)
 
