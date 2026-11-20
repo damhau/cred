@@ -49,29 +49,38 @@ class FakeDPAPI:
 
 
 class FakeFido:
-    """A set of YubiKeys: each credential has a device secret; PRF is HMAC(device secret, salt). `plugged` picks who answers."""
+    """YubiKeys and Windows Hello: each credential has a device secret; PRF is HMAC(device secret, salt).
+    `plugged` picks who answers; `hello_prf = False` is a Windows build whose Hello has no PRF."""
 
     def __init__(self):
         self.devices = {}
+        self.platform = set()
         self.plugged = None
+        self.hello_prf = True
         self.touches = 0
+        self.asked = []
 
-    def enroll(self, rp_id, salts, exclude=()):
+    def enroll(self, rp_id, salts, exclude=(), platform=False):
         if self.plugged is False:
-            raise CredError("YubiKey: NotAllowedError: timed out")
+            raise CredError("WebAuthn: NotAllowedError: timed out")
+        if platform and not self.hello_prf:
+            raise CredError("WebAuthn: this authenticator does not support PRF (hmac-secret)")
         self.touches += 1
         cred_id = os.urandom(16)
         self.devices[cred_id] = os.urandom(32)
+        if platform:
+            self.platform.add(cred_id)
         return cred_id, [self._prf(cred_id, s) for s in salts]
 
     def prf(self, rp_id, creds):
         if self.plugged is False:
-            raise CredError("YubiKey: NotAllowedError: timed out")
+            raise CredError("WebAuthn: NotAllowedError: timed out")
         self.touches += 1
+        self.asked.append(set(creds))
         for cred_id, salts in creds.items():
             if cred_id in self.devices and (self.plugged in (None, True) or self.plugged == cred_id):
                 return cred_id, [self._prf(cred_id, s) for s in salts]
-        raise CredError("YubiKey: no enrolled key answered")
+        raise CredError("WebAuthn: no enrolled key answered")
 
     def _prf(self, cred_id, salt):
         return hmac.new(self.devices[cred_id], salt, hashlib.sha256).digest()

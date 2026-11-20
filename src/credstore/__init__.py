@@ -1,4 +1,4 @@
-"""credstore: a machine-bound secret store for WSL2 (Windows DPAPI) with YubiKey-gated tiers.
+"""credstore: a machine-bound secret store for WSL2 (Windows DPAPI) with tiers gated by a YubiKey or Windows Hello.
 
     credstore.get("splunk")              the secret
     credstore.resolve("cred:splunk")     "cred:NAME" -> the secret, "env:VAR" -> $VAR, anything else is returned as is

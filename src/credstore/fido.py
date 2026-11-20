@@ -1,9 +1,9 @@
-"""YubiKey through FIDO2 PRF (hmac-secret) and the Windows WebAuthn API.
+"""YubiKey and Windows Hello through WebAuthn PRF (hmac-secret) and the Windows WebAuthn API.
 
 Since Windows 10 1903 a non-admin process can only reach a FIDO key through webauthn.dll, so the helper below runs in
-Windows Python (uv.exe) with Yubico's fido2 library. Only non-secret values (credential ids, salts) go in argv; the PRF
-outputs come back on stdout. The key checks the fingerprint itself and the output for a salt never changes, which
-makes it usable as key material.
+Windows Python (uv.exe) with Yubico's fido2 library. The same call reaches Windows Hello when the credential is a
+platform one. Only non-secret values (credential ids, salts) go in argv; the PRF outputs come back on stdout. The
+authenticator verifies the user itself and the output for a salt never changes, which makes it usable as key material.
 """
 
 import glob
@@ -59,6 +59,7 @@ def descriptors(cred_ids):
 
 
 def enroll(client, req):
+    platform = req.get("platform", False)
     result = client.make_credential(PublicKeyCredentialCreationOptions(
         rp=PublicKeyCredentialRpEntity(id=req["rp_id"], name="credstore"),
         user=PublicKeyCredentialUserEntity(id=os.urandom(16), name="credstore", display_name="credstore secret store"),
@@ -67,18 +68,18 @@ def enroll(client, req):
         timeout=TIMEOUT_MS,
         exclude_credentials=descriptors(req["exclude"]),
         authenticator_selection=AuthenticatorSelectionCriteria(
-            authenticator_attachment=AuthenticatorAttachment.CROSS_PLATFORM,
-            resident_key=ResidentKeyRequirement.DISCOURAGED,
+            authenticator_attachment=AuthenticatorAttachment.PLATFORM if platform else AuthenticatorAttachment.CROSS_PLATFORM,
+            resident_key=ResidentKeyRequirement.PREFERRED if platform else ResidentKeyRequirement.DISCOURAGED,
             user_verification=UserVerificationRequirement.REQUIRED,
         ),
         extensions={"prf": {"eval": prf_values(req["salts"])}},
     ))
     if not result.response.attestation_object.auth_data.is_user_verified():
-        reply({"error": "the key did not verify you (no fingerprint or PIN check)"}, 1)
+        reply({"error": "you were not verified (no fingerprint, face or PIN check)"}, 1)
     extensions = result.client_extension_results
     out = outputs(extensions)
     if not out and not (extensions.get("prf") or {}).get("enabled"):
-        reply({"error": "this key does not support PRF (hmac-secret)"}, 1)
+        reply({"error": "this authenticator does not support PRF (hmac-secret)"}, 1)
     reply({"cred_id": websafe_encode(result.raw_id), "outputs": out})
 
 
@@ -97,10 +98,10 @@ def prf(client, req):
         extensions={"prf": extension},
     )).get_response(0)
     if not response.response.authenticator_data.is_user_verified():
-        reply({"error": "the key did not verify you (no fingerprint or PIN check)"}, 1)
+        reply({"error": "you were not verified (no fingerprint, face or PIN check)"}, 1)
     out = outputs(response.client_extension_results)
     if not out:
-        reply({"error": "the key returned no PRF output"}, 1)
+        reply({"error": "the authenticator returned no PRF output"}, 1)
     reply({"cred_id": websafe_encode(response.raw_id), "outputs": out})
 
 
@@ -131,7 +132,7 @@ def find_uv():
 
 
 class WindowsFido:
-    """enroll(rp_id, salts, exclude) and prf(rp_id, {cred_id: salts}); tests use a fake with the same two methods."""
+    """enroll(rp_id, salts, exclude, platform) and prf(rp_id, {cred_id: salts}); tests use a fake with the same two methods."""
 
     def __init__(self, uv_exe=None):
         self._uv_exe = uv_exe
@@ -142,13 +143,15 @@ class WindowsFido:
             self._uv_exe = find_uv()
         return self._uv_exe
 
-    def enroll(self, rp_id, salts, exclude=()):
-        """New non-discoverable credential; -> (cred_id, PRF outputs for salts, or [] when Windows gives none at creation)."""
-        r = self._run({"op": "enroll", "rp_id": rp_id, "salts": [b64e(s) for s in salts], "exclude": [b64e(c) for c in exclude]})
+    def enroll(self, rp_id, salts, exclude=(), platform=False):
+        """New credential on a security key, or on Windows Hello when platform;
+        -> (cred_id, PRF outputs for salts, or [] when Windows gives none at creation)."""
+        r = self._run({"op": "enroll", "rp_id": rp_id, "salts": [b64e(s) for s in salts], "exclude": [b64e(c) for c in exclude],
+                       "platform": platform})
         return b64d(r["cred_id"]), [b64d(o) for o in r.get("outputs") or []]
 
     def prf(self, rp_id, creds):
-        """creds: {cred_id: [salt, salt?]}; any one enrolled key answers -> (its cred_id, its PRF outputs)."""
+        """creds: {cred_id: [salt, salt?]}; any one of them answers -> (its cred_id, its PRF outputs)."""
         r = self._run({"op": "prf", "rp_id": rp_id, "creds": {b64e(c): [b64e(s) for s in salts] for c, salts in creds.items()}})
         return b64d(r["cred_id"]), [b64d(o) for o in r["outputs"]]
 
@@ -163,13 +166,13 @@ class WindowsFido:
         except FileNotFoundError:
             raise CredError(f"{uv} not found (set CREDSTORE_UV_EXE)") from None
         except subprocess.TimeoutExpired:
-            raise CredError(f"no answer from the YubiKey within {TIMEOUT}s") from None
+            raise CredError(f"no answer from the authenticator within {TIMEOUT}s") from None
         lines = r.stdout.decode("utf-8", "replace").strip().splitlines()
         try:
             reply = json.loads(lines[-1])
         except (IndexError, ValueError):
             detail = r.stderr.decode("utf-8", "replace").strip()[-300:] or "no output"
-            raise CredError(f"the YubiKey helper failed: {detail}") from None
+            raise CredError(f"the WebAuthn helper failed: {detail}") from None
         if "error" in reply:
-            raise CredError(f"YubiKey: {reply['error']}")
+            raise CredError(f"WebAuthn: {reply['error']}")
         return reply

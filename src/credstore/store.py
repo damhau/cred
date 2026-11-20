@@ -189,5 +189,5 @@ class Store:
         except CredError as e:
             audit.record("read", strict=False, name=name, tier="confirm", ok=False, error=str(e), chain=chain)
             raise
-        audit.record("read", name=name, tier="confirm", ok=True, method=method or "auto", chain=chain)
+        audit.record("read", name=name, tier="confirm", ok=True, method=method or self.keys.default_method(), chain=chain)
         return secret

@@ -4,6 +4,7 @@ import json
 import pytest
 
 from credstore import audit, cli
+from credstore.core import b64d
 from tests.conftest import PASSPHRASE, needs_agent
 
 
@@ -25,7 +26,7 @@ def run(store, *argv, stdin="", monkeypatch=None):
 @pytest.fixture
 def tty_passphrase(monkeypatch):
     answers = iter([PASSPHRASE, PASSPHRASE])
-    monkeypatch.setattr("sys.stdin", Stdin("", tty=True))
+    monkeypatch.setattr("sys.stdin", Stdin("\n", tty=True))
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": next(answers))
 
 
@@ -115,10 +116,52 @@ def test_log_and_key_list(keyed, monkeypatch, capsys):
     assert "read" in out and "prod" in out
     assert run(keyed, "key", "list") == 0
     out = capsys.readouterr().out
-    assert "fido2" in out and "passphrase" in out
+    assert "yubikey" in out and "(default)" in out and "passphrase" in out
 
 
 def test_doctor_with_fakes(keyed, capsys):
     assert run(keyed, "doctor", "--yubikey") == 0
     out = capsys.readouterr().out
     assert "a wrong key is refused" in out and "YubiKey opens the unlock key" in out
+
+
+@pytest.mark.parametrize("answer, methods", [("\n", ["fido2"]), ("2\n", ["hello"]), ("hello\n", ["hello"]), ("3\n", [])])
+def test_init_asks_for_the_unlock_device(store, tty_passphrase, monkeypatch, capsys, answer, methods):
+    monkeypatch.setattr("sys.stdin", Stdin(answer, tty=True))
+    assert run(store, "init") == 0
+    assert [s["method"] for s in store.keyslots()] == methods + ["passphrase"]
+    assert "Windows Hello: face, fingerprint or PIN" in capsys.readouterr().err
+
+
+def test_init_device_flag_skips_the_question(store, tty_passphrase, capsys):
+    assert run(store, "init", "--device", "hello") == 0
+    err = capsys.readouterr().err
+    assert "Unlock device:" not in err and "Confirm with Windows Hello" in err
+    assert run(store, "init", "--device", "yubikey") == 1
+    assert "already exist" in capsys.readouterr().err
+
+
+def test_init_refuses_an_unknown_answer(store, tty_passphrase, monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", Stdin("4\n", tty=True))
+    assert run(store, "init") == 1
+    assert "choose 1, 2 or 3" in capsys.readouterr().err
+    assert store.keyslots() == []
+
+
+def test_key_add_hello_then_read_with_it(keyed, monkeypatch, capsys):
+    assert run(keyed, "key", "add", "hello") == 0
+    hello = next(b64d(s["params"]["cred_id"]) for s in keyed.keyslots() if s["method"] == "hello")
+    run(keyed, "set", "root", "--tier", "confirm", "--with", "hello", stdin="r00t", monkeypatch=monkeypatch)
+    assert keyed.fido.asked[-1] == {hello}
+    capsys.readouterr()
+    assert run(keyed, "get", "root", "--with", "hello") == 0
+    assert capsys.readouterr().out == "r00t"
+    assert keyed.fido.asked[-1] == {hello}
+    assert [e["method"] for e in audit.entries() if e["event"] == "read"][-1] == "hello"
+    assert run(keyed, "doctor", "--device", "--with", "hello") == 0
+    assert "Windows Hello opens the unlock key" in capsys.readouterr().out
+
+
+def test_key_add_yubikey_still_works(keyed):
+    assert run(keyed, "key", "add-yubikey", "--label", "backup") == 0
+    assert [s["label"] for s in keyed.keyslots()][-1] == "backup"

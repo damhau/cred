@@ -94,6 +94,15 @@ def test_enroll_asks_for_a_verified_roaming_non_resident_credential(client, monk
     assert [d.id for d in options.exclude_credentials] == [b"old"]
 
 
+def test_enroll_on_windows_hello_asks_for_a_platform_credential(client, monkeypatch):
+    request = {"op": "enroll", "rp_id": "cred.local", "salts": [b64e(b"1" * 32), b64e(b"2" * 32)], "exclude": [], "platform": True}
+    code, _ = run_helper(monkeypatch, request)
+    assert code == 0
+    selection = client.calls[0].authenticator_selection
+    assert selection.authenticator_attachment == AuthenticatorAttachment.PLATFORM
+    assert selection.user_verification == UserVerificationRequirement.REQUIRED
+
+
 def test_prf_with_one_key_uses_eval(client, monkeypatch):
     salt = b"u" * 32
     code, reply = run_helper(monkeypatch, {"op": "prf", "rp_id": "cred.local", "creds": {b64e(b"k1"): [b64e(salt)]}})
@@ -115,7 +124,7 @@ def test_prf_with_two_keys_uses_per_credential_salts(client, monkeypatch):
 def test_unverified_user_is_an_error(client, monkeypatch):
     client.verified = False
     code, reply = run_helper(monkeypatch, {"op": "prf", "rp_id": "cred.local", "creds": {b64e(b"k1"): [b64e(b"u" * 32)]}})
-    assert code == 1 and "did not verify" in reply["error"]
+    assert code == 1 and "not verified" in reply["error"]
 
 
 def test_client_errors_are_reported(client, monkeypatch):

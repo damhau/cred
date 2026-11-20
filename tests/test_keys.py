@@ -53,7 +53,7 @@ def test_unlock_output_cannot_open_the_confirm_key(keyed):
 
 def test_backup_yubikey(keyed):
     first = b64d(keyed.keyslots()[0]["params"]["cred_id"])
-    keyed.keys.add_yubikey("backup")
+    keyed.keys.add_device("yubikey", "backup")
     second = b64d(keyed.keyslots()[-1]["params"]["cred_id"])
     keyed.fido.plugged = second
     assert keyed.keys.data_keys() == keyed.keys.data_keys("passphrase")
@@ -93,3 +93,43 @@ def test_passphrase_slot_keys_depend_on_salt():
     other = {**params, "salt": "AQEBAQEBAQEBAQEBAQEBAQ"}
     assert passphrase_slot_keys("pw", params) == passphrase_slot_keys("pw", params)
     assert passphrase_slot_keys("pw", params)["unlock"] != passphrase_slot_keys("pw", other)["unlock"]
+
+
+def test_init_with_windows_hello(store):
+    store.keys.init(PASSPHRASE, device="hello")
+    hello, _ = store.keyslots()
+    assert [s["method"] for s in store.keyslots()] == ["hello", "passphrase"]
+    assert b64d(hello["params"]["cred_id"]) in store.fido.platform
+    assert store.keys.default_method() == "hello"
+    assert store.keys.data_keys() == store.keys.data_keys("passphrase")
+
+
+def test_init_with_the_passphrase_only(store):
+    store.keys.init(PASSPHRASE, device=None)
+    assert [s["method"] for s in store.keyslots()] == ["passphrase"]
+    assert store.keys.default_method() == "passphrase"
+    assert store.fido.touches == 0
+    assert len(store.keys.data_key("unlock")) == 32
+
+
+def test_windows_hello_without_prf_says_which_update_it_needs(store):
+    store.fido.hello_prf = False
+    with pytest.raises(CredError, match="does not support PRF .*February 2026"):
+        store.keys.init(PASSPHRASE, device="hello")
+    assert store.keyslots() == []
+
+
+def test_the_device_chosen_at_init_stays_the_default(keyed):
+    keyed.keys.add_device("hello")
+    yubikey, hello = (b64d(s["params"]["cred_id"]) for s in keyed.keyslots() if s["method"] != "passphrase")
+    assert keyed.keys.default_method() == "fido2"
+    keyed.keys.data_keys()
+    assert keyed.fido.asked[-1] == {yubikey}
+    by_hello = keyed.keys.data_keys("hello")
+    assert keyed.fido.asked[-1] == {hello}
+    assert by_hello == keyed.keys.data_keys("passphrase")
+
+
+def test_a_device_that_is_not_enrolled(keyed):
+    with pytest.raises(CredError, match="no Windows Hello enrolled.*cred key add hello"):
+        keyed.keys.data_key("unlock", "hello")

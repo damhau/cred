@@ -16,10 +16,16 @@ from . import agent, audit
 from .core import KEEP, TIERS, VAR_RE, CredError, check_name, expiry, parse_duration, parse_expires, utcnow
 from .dpapi import HEX_BLOB_RE, PowerShell
 from .fido import WindowsFido, find_uv
+from .keys import DEVICE_METHODS, DEVICE_NAMES, DEVICES, LABELS, METHODS
 from .store import Store
 
 CANARY = "Pässwörd-日本語-🔐 \" \\ ' $x `t"           # doctor's round-trip value: non-ASCII, quote, backslash, shell and PowerShell specials
 MAX_UNLOCK = 24 * 3600
+INIT_CHOICES = (("yubikey", "YubiKey: fingerprint on the key"),
+                ("hello", "Windows Hello: face, fingerprint or PIN on this PC"),
+                ("none", "none for now: recovery passphrase only"))
+VERIFY_HINT = {"yubikey": "Touch your YubiKey when Windows asks (one fingerprint, sometimes two).",
+               "hello": "Confirm with Windows Hello when Windows asks (face, fingerprint or PIN; sometimes twice)."}
 
 
 def stdout_is_tty():
@@ -31,7 +37,28 @@ def local_hhmm(iso):
 
 
 def method_of(args):
-    return "passphrase" if getattr(args, "passphrase", False) else None
+    if getattr(args, "passphrase", False):
+        return "passphrase"
+    choice = getattr(args, "with_", None)
+    return METHODS[choice] if choice else None
+
+
+def choose_device():
+    if not sys.stdin.isatty():
+        raise CredError("`cred init` needs a terminal (or --device)")
+    print("Unlock device:", file=sys.stderr)
+    for i, (_, text) in enumerate(INIT_CHOICES, 1):
+        print(f"  {i}) {text}", file=sys.stderr)
+    sys.stderr.write("Choose [1]: ")
+    sys.stderr.flush()
+    line = sys.stdin.readline()
+    if not line:
+        raise CredError("cancelled")
+    answer = line.strip() or "1"
+    for i, (name, _) in enumerate(INIT_CHOICES, 1):
+        if answer in (str(i), name):
+            return name
+    raise CredError(f"{answer!r}: choose 1, 2 or 3")
 
 
 def read_secret():
@@ -144,10 +171,13 @@ def cmd_import(args, store):
 # ---- keys and unlocking
 
 def cmd_init(args, store):
+    if store.keys.initialized():
+        raise CredError("keys already exist: see `cred key list`")
+    device = args.device or choose_device()
     passphrase = new_passphrase()
-    if not args.no_yubikey:
-        print("Touch your YubiKey when Windows asks (one fingerprint, sometimes two).", file=sys.stderr)
-    rows = store.keys.init(passphrase, yubikey=not args.no_yubikey, label=args.label)
+    if device in VERIFY_HINT:
+        print(VERIFY_HINT[device], file=sys.stderr)
+    rows = store.keys.init(passphrase, device=None if device == "none" else device, label=args.label)
     audit.record("init", strict=False, slots=[r["method"] for r in rows], chain=audit.process_chain(os.getpid()))
     print(f"keys created: {', '.join(r['label'] for r in rows)}. New secrets now default to the locked tier.", file=sys.stderr)
 
@@ -163,7 +193,7 @@ def cmd_unlock(args, store):
         agent.start(store, key, ttl, min(idle, ttl), store.agent.path)
     finally:
         key[:] = bytes(len(key))
-    audit.record("unlock", strict=False, method=method_of(args) or "auto", ttl=ttl, idle=idle, chain=audit.process_chain(os.getpid()))
+    audit.record("unlock", strict=False, method=method_of(args) or store.keys.default_method(), ttl=ttl, idle=idle, chain=audit.process_chain(os.getpid()))
     status = store.agent.status() or {}
     print(f"unlocked until {local_hhmm(status['until'])} (locks after {args.idle} without reads)" if status else "unlocked", file=sys.stderr)
 
@@ -193,15 +223,19 @@ def cmd_key_list(args, store):
     if not slots:
         print("no keys yet: run `cred init`", file=sys.stderr)
         return
+    default = store.keys.default_method(slots)
     for s in slots:
-        detail = f"credential {s['params']['cred_id'][:12]}…" if s["method"] == "fido2" else f"scrypt n=2^{s['params']['n'].bit_length() - 1}"
-        print(f"{s['id']:>3}  {s['method']:<10}  {s['label']:<22}  {detail}  added {s['created_at'][:10]}")
+        device = s["method"] in DEVICE_METHODS
+        detail = f"credential {s['params']['cred_id'][:12]}…" if device else f"scrypt n=2^{s['params']['n'].bit_length() - 1}"
+        mark = "  (default)" if device and s["method"] == default else ""
+        print(f"{s['id']:>3}  {DEVICE_NAMES.get(s['method'], s['method']):<10}  {s['label']:<22}  {detail}  added {s['created_at'][:10]}{mark}")
 
 
-def cmd_key_add_yubikey(args, store):
-    print("First unlock with an enrolled key (or --passphrase), then touch the NEW YubiKey when Windows asks.", file=sys.stderr)
-    row = store.keys.add_yubikey(args.label, method_of(args))
-    audit.record("key-add", strict=False, method="fido2", label=row["label"], chain=audit.process_chain(os.getpid()))
+def cmd_key_add(args, store):
+    new = "touch the NEW YubiKey" if args.device == "yubikey" else "confirm with Windows Hello"
+    print(f"First verify with your current device (or --passphrase), then {new} when Windows asks.", file=sys.stderr)
+    row = store.keys.add_device(args.device, args.label, method_of(args))
+    audit.record("key-add", strict=False, method=row["method"], label=row["label"], chain=audit.process_chain(os.getpid()))
     print(f"added {row['label']}", file=sys.stderr)
 
 
@@ -262,22 +296,28 @@ def cmd_doctor(args, store):
 
     slots = store.keyslots()
     methods = Counter(s["method"] for s in slots)
-    if isinstance(store.fido, WindowsFido) and (methods["fido2"] or args.yubikey):
+    devices = [m for m in DEVICE_METHODS if methods[m]]
+    if isinstance(store.fido, WindowsFido) and (devices or args.device):
         try:
             report("ok", f"uv.exe: {find_uv()}")
         except CredError as e:
             report("FAIL", str(e))
     if not slots:
-        report("warn", "no keys yet: `cred init` adds the YubiKey and the recovery passphrase")
+        report("warn", "no keys yet: `cred init` sets the recovery passphrase and your unlock device")
     else:
-        report("ok" if methods["fido2"] else "warn", f"YubiKey slots: {methods['fido2']}")
+        default = store.keys.default_method(slots)
+        for m in devices:
+            report("ok", f"{LABELS[m]} slots: {methods[m]}" + (" (default)" if m == default else ""))
+        if not devices:
+            report("warn", "no unlock device, passphrase only: `cred key add yubikey|hello`")
         report("ok" if methods["passphrase"] else "warn", f"recovery passphrase: {'set' if methods['passphrase'] else 'MISSING'}")
-    if args.yubikey:
+    if args.device and slots:
+        method = method_of(args) or store.keys.default_method(slots)
         try:
-            store.keys.data_key("unlock", "fido2")
-            report("ok", "YubiKey opens the unlock key")
+            store.keys.data_key("unlock", method)
+            report("ok", f"{LABELS[method]} opens the unlock key")
         except CredError as e:
-            report("FAIL", f"YubiKey: {e}")
+            report("FAIL", f"{LABELS[method]}: {e}")
 
     if store.path.exists():
         loose = [str(p) for p in (store.path, store.path.parent) if stat.S_IMODE(p.stat().st_mode) & 0o077]
@@ -297,7 +337,8 @@ def cmd_doctor(args, store):
 # ---- parser
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="cred", description="Machine-bound secret store for WSL2 (Windows DPAPI), unlocked with a YubiKey. "
+    p = argparse.ArgumentParser(prog="cred", description="Machine-bound secret store for WSL2 (Windows DPAPI), unlocked with a YubiKey "
+                                                         "or Windows Hello. "
                                                          "Run `cred doctor` first.")
     sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
 
@@ -306,7 +347,9 @@ def build_parser():
         for a in positionals:
             sp.add_argument(a)
         if passphrase:
-            sp.add_argument("--passphrase", action="store_true", help="use the recovery passphrase instead of the YubiKey")
+            sp.add_argument("--with", dest="with_", choices=(*DEVICES, "passphrase"),
+                            help="verify with this instead of the device chosen at `cred init`")
+            sp.add_argument("--passphrase", action="store_true", help="same as --with passphrase")
         sp.set_defaults(func=func)
         return sp
 
@@ -316,7 +359,7 @@ def build_parser():
         return sp
 
     s = meta(add(sub, "set", cmd_set, "store or replace a secret (silent prompt on a tty, else stdin)", "name", passphrase=True))
-    s.add_argument("--tier", choices=TIERS, help="open: no unlock needed; locked: needs `cred unlock`; confirm: YubiKey on every read "
+    s.add_argument("--tier", choices=TIERS, help="open: no unlock needed; locked: needs `cred unlock`; confirm: your device on every read "
                                                  "(default: the current tier, or locked once `cred init` ran)")
     add(sub, "get", cmd_get, "print a secret (no trailing newline when piped)", "name", passphrase=True)
     add(sub, "list", cmd_list, "list names, tiers, expiry and notes (never decrypts)").add_argument("--json", action="store_true")
@@ -327,19 +370,25 @@ def build_parser():
     add(sub, "curl-config", cmd_curl_config, 'print user = "USER:secret" for  curl -K - ...', "name", "user", passphrase=True)
     meta(add(sub, "import", cmd_import, "adopt an existing ConvertFrom-SecureString .dpapi file (open tier)", "name", "file"))
 
-    i = add(sub, "init", cmd_init, "create the data keys: a recovery passphrase plus your YubiKey")
-    i.add_argument("--no-yubikey", action="store_true", help="passphrase only for now (add the key later with `cred key add-yubikey`)")
-    i.add_argument("--label", help="name for the YubiKey slot")
-    u = add(sub, "unlock", cmd_unlock, "open the locked tier for a while (YubiKey fingerprint)", passphrase=True)
+    i = add(sub, "init", cmd_init, "create the data keys: a recovery passphrase plus your unlock device (YubiKey or Windows Hello)")
+    i.add_argument("--device", choices=[c for c, _ in INIT_CHOICES], help="unlock device (asked when omitted)")
+    i.add_argument("--label", help="name for the device's key slot")
+    u = add(sub, "unlock", cmd_unlock, "open the locked tier for a while (one YubiKey or Windows Hello check)", passphrase=True)
     u.add_argument("--for", dest="for_", default="30m", help="lock after this long in any case (default 30m, at most 24h)")
     u.add_argument("--idle", default="10m", help="lock after this long without a read (default 10m)")
     add(sub, "lock", cmd_lock, "lock now")
     add(sub, "status", cmd_status, "locked or unlocked, secrets per tier, key slots").add_argument("--json", action="store_true")
 
-    k = sub.add_parser("key", help="manage the key slots (YubiKeys, recovery passphrase)", description="manage the key slots")
+    k = sub.add_parser("key", help="manage the key slots (YubiKeys, Windows Hello, recovery passphrase)", description="manage the key slots")
     ksub = k.add_subparsers(dest="key_cmd", required=True, metavar="action")
     add(ksub, "list", cmd_key_list, "list key slots")
-    add(ksub, "add-yubikey", cmd_key_add_yubikey, "enroll another YubiKey (a backup key)", passphrase=True).add_argument("--label")
+    ka = add(ksub, "add", cmd_key_add, "enroll another unlock device: a backup YubiKey, or Windows Hello", passphrase=True)
+    ka.add_argument("device", choices=DEVICES)
+    ka.add_argument("--label")
+    legacy = ksub.add_parser("add-yubikey")     # the 0.2.0 spelling, kept working but unlisted
+    legacy.add_argument("--label")
+    legacy.add_argument("--passphrase", action="store_true")
+    legacy.set_defaults(func=cmd_key_add, device="yubikey")
     add(ksub, "passwd", cmd_key_passwd, "set a new recovery passphrase", passphrase=True)
     r = add(ksub, "rm", cmd_key_rm, "remove a key slot")
     r.add_argument("id", type=int)
@@ -348,8 +397,10 @@ def build_parser():
     lg = add(sub, "log", cmd_log, "show the audit log (who read what)")
     lg.add_argument("-n", type=int, default=20, help="entries to show (default 20)")
     lg.add_argument("--json", action="store_true")
-    add(sub, "doctor", cmd_doctor, "check PowerShell, DPAPI, keys and the agent").add_argument(
-        "--yubikey", action="store_true", help="also check that the YubiKey opens the store (one fingerprint)")
+    d = add(sub, "doctor", cmd_doctor, "check PowerShell, DPAPI, keys and the agent")
+    d.add_argument("--device", action="store_true", help="also check that your unlock device opens the store (one check)")
+    d.add_argument("--with", dest="with_", choices=DEVICES, help="the device to check, when you enrolled both")
+    d.add_argument("--yubikey", dest="device", action="store_true", help=argparse.SUPPRESS)
     return p
 
 
