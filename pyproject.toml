@@ -1,0 +1,25 @@
+[project]
+name = "credstore"
+version = "0.2.0"
+description = "Machine-bound secret store for WSL2: Windows DPAPI, locked tiers opened with a YubiKey fingerprint"
+authors = [
+    { name = "Damien Hauser", email = "damien@dhconsulting.ch" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+cred = "credstore.cli:main"
+
+[dependency-groups]
+dev = [
+    "fido2==2.2.1",
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
